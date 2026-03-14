@@ -30,7 +30,7 @@
  *
  * @author  Broodle <https://broodle.host>
  * @link    https://engage.broodle.one
- * @version 2.1.7
+ * @version 2.1.8
  *
  * Auto-update: tags releases on https://github.com/maitpatni/broodle-engage-whmcs
  * WHMCS admin can check for and apply updates from the server module page.
@@ -46,7 +46,7 @@ use WHMCS\Database\Capsule;
 // UPDATE CHECKER CONSTANTS
 // ─────────────────────────────────────────────────────────────────────────────
 
-define('BROODLEENGAGE_VERSION',      '2.1.7');
+define('BROODLEENGAGE_VERSION',      '2.1.8');
 define('BROODLEENGAGE_GITHUB_REPO',  'maitpatni/broodle-engage-whmcs');
 define('BROODLEENGAGE_MODULE_DIR',   __DIR__);
 define('BROODLEENGAGE_UPDATE_CACHE', __DIR__ . '/.update_cache.json');
@@ -223,6 +223,11 @@ function broodleengage_ensureTable(): void
             $table->timestamp('provisioned_at')->nullable();
         });
     }
+    if (!Capsule::schema()->hasColumn('mod_broodleengage', 'chatwoot_password')) {
+        Capsule::schema()->table('mod_broodleengage', function ($table) {
+            $table->string('chatwoot_password', 512)->nullable()->after('chatwoot_email');
+        });
+    }
 }
 
 /**
@@ -323,6 +328,7 @@ function broodleengage_CreateAccount(array $params)
                 'chatwoot_user_id'    => $chatwootUserId,
                 'chatwoot_user_token' => $chatwootUserToken,
                 'chatwoot_email'      => $email,
+                'chatwoot_password'   => encrypt($password),
                 'chatwoot_status'     => 'active',
                 'provisioned_at'      => $now,
                 'updated_at'          => $now,
@@ -334,6 +340,7 @@ function broodleengage_CreateAccount(array $params)
                 'chatwoot_user_id'    => $chatwootUserId,
                 'chatwoot_user_token' => $chatwootUserToken,
                 'chatwoot_email'      => $email,
+                'chatwoot_password'   => encrypt($password),
                 'chatwoot_status'     => 'active',
                 'provisioned_at'      => $now,
                 'created_at'          => $now,
@@ -604,10 +611,18 @@ function broodleengage_ClientArea(array $params)
     $hosting     = Capsule::table('tblhosting')->where('id', $serviceId)->first();
     $whmcsStatus = $hosting ? $hosting->domainstatus : 'Unknown';
 
-    // Decrypt stored password to show on service page
-    // htmlspecialchars-escaped version is used in onclick attributes to prevent JS injection
+    // Get password from our own table (most reliable source — always in sync)
+    // Fall back to tblhosting.password if chatwoot_password column not yet populated
     $servicePassword = '';
-    if ($hosting && !empty($hosting->password)) {
+    if ($record && !empty($record->chatwoot_password)) {
+        try {
+            $servicePassword = decrypt($record->chatwoot_password);
+        } catch (Exception $e) {
+            $servicePassword = '';
+        }
+    }
+    // Fallback: try tblhosting if our column is empty (e.g. accounts provisioned before v2.1.8)
+    if ($servicePassword === '' && $hosting && !empty($hosting->password)) {
         try {
             $servicePassword = decrypt($hosting->password);
         } catch (Exception $e) {
@@ -944,6 +959,11 @@ function broodleengage_ResetPassword(array $params)
         Capsule::table('tblhosting')->where('id', $serviceId)->update([
             'password'   => encrypt($newPassword),
             'updated_at' => date('Y-m-d H:i:s'),
+        ]);
+
+        Capsule::table('mod_broodleengage')->where('service_id', $serviceId)->update([
+            'chatwoot_password' => encrypt($newPassword),
+            'updated_at'        => date('Y-m-d H:i:s'),
         ]);
 
         return 'success';
