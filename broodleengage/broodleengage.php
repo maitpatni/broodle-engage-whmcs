@@ -30,7 +30,7 @@
  *
  * @author  Broodle <https://broodle.host>
  * @link    https://engage.broodle.one
- * @version 2.1.6
+ * @version 2.1.7
  *
  * Auto-update: tags releases on https://github.com/maitpatni/broodle-engage-whmcs
  * WHMCS admin can check for and apply updates from the server module page.
@@ -46,7 +46,7 @@ use WHMCS\Database\Capsule;
 // UPDATE CHECKER CONSTANTS
 // ─────────────────────────────────────────────────────────────────────────────
 
-define('BROODLEENGAGE_VERSION',      '2.1.6');
+define('BROODLEENGAGE_VERSION',      '2.1.7');
 define('BROODLEENGAGE_GITHUB_REPO',  'maitpatni/broodle-engage-whmcs');
 define('BROODLEENGAGE_MODULE_DIR',   __DIR__);
 define('BROODLEENGAGE_UPDATE_CACHE', __DIR__ . '/.update_cache.json');
@@ -226,28 +226,6 @@ function broodleengage_ensureTable(): void
 }
 
 /**
- * Send a WHMCS email template using localAPI.
- *
- * For 'product' type templates, $relatedId must be the SERVICE ID (tblhosting.id).
- * For 'general' type templates, $relatedId must be the CLIENT ID (tblclients.id).
- *
- * customvars when using localAPI must be a plain array — NOT base64/serialized.
- * Template variables are accessed in the email body as {$variable_name} (Smarty).
- */
-function broodleengage_sendEmail(string $templateName, int $relatedId, array $mergeFields): void
-{
-    $result = localAPI('SendEmail', [
-        'messagename' => $templateName,
-        'id'          => $relatedId,   // service ID for product-type templates
-        'customvars'  => $mergeFields, // plain array for localAPI — NOT base64_encode(serialize())
-    ]);
-
-    if (isset($result['result']) && $result['result'] !== 'success') {
-        throw new Exception('SendEmail failed: ' . ($result['message'] ?? json_encode($result)));
-    }
-}
-
-/**
  * Generate a cryptographically secure random password.
  */
 function broodleengage_generatePassword(int $length = 16): string
@@ -369,22 +347,7 @@ function broodleengage_CreateAccount(array $params)
             'password' => encrypt($password),
         ]);
 
-        // ── 7. Send welcome email ─────────────────────────────────────────────
-        // id = service ID for product-type email templates
-        try {
-            broodleengage_sendEmail('Broodle Engage Welcome Email', $serviceId, [
-                'service_name'   => 'Broodle Engage',
-                'account_id'     => $chatwootAccountId,
-                'login_email'    => $email,
-                'login_password' => $password,
-                'login_url'      => $baseUrl . '/auth/sign_in',
-                'dashboard_url'  => $baseUrl . '/app/accounts/' . $chatwootAccountId . '/dashboard',
-                'plan_name'      => $planName,
-            ]);
-        } catch (Exception $e) {
-            logModuleCall('broodleengage', 'CreateAccount_email', [], [], $e->getMessage(), []);
-        }
-
+        // ── 7. Log success ────────────────────────────────────────────────────
         logModuleCall('broodleengage', __FUNCTION__,
             ['serviceid' => $serviceId, 'email' => $email, 'account_id' => $chatwootAccountId],
             $accountResp, 'Account created successfully', ['serveraccesshash']
@@ -982,16 +945,6 @@ function broodleengage_ResetPassword(array $params)
             'password'   => encrypt($newPassword),
             'updated_at' => date('Y-m-d H:i:s'),
         ]);
-
-        try {
-            broodleengage_sendEmail('Broodle Engage Password Reset', $serviceId, [
-                'service_name' => 'Broodle Engage',
-                'new_password' => $newPassword,
-                'login_url'    => broodleengage_getApiBase($params) . '/auth/sign_in',
-            ]);
-        } catch (Exception $e) {
-            logModuleCall('broodleengage', 'ResetPassword_email', [], [], $e->getMessage(), []);
-        }
 
         return 'success';
 
