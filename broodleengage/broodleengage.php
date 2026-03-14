@@ -30,7 +30,7 @@
  *
  * @author  Broodle <https://broodle.host>
  * @link    https://engage.broodle.one
- * @version 2.1.0
+ * @version 2.1.1
  *
  * Auto-update: tags releases on https://github.com/maitpatni/broodle-engage-whmcs
  * WHMCS admin can check for and apply updates from the server module page.
@@ -46,7 +46,7 @@ use WHMCS\Database\Capsule;
 // UPDATE CHECKER CONSTANTS
 // ─────────────────────────────────────────────────────────────────────────────
 
-define('BROODLEENGAGE_VERSION',      '2.1.0');
+define('BROODLEENGAGE_VERSION',      '2.1.1');
 define('BROODLEENGAGE_GITHUB_REPO',  'maitpatni/broodle-engage-whmcs');
 define('BROODLEENGAGE_MODULE_DIR',   __DIR__);
 define('BROODLEENGAGE_UPDATE_CACHE', __DIR__ . '/.update_cache.json');
@@ -1172,12 +1172,14 @@ function broodleengage_AdminServicesTabFields(array $params): array
         }
     }
 
-    // ── Fetch users for the currently linked account (for the user picker) ────
+    // ── Determine which account ID to fetch users for ────────────────────────
+    // Priority: ?be_preview_aid GET param (admin clicked "Load Users") > saved record
+    $previewAid         = (int) ($_GET['be_preview_aid'] ?? $record->chatwoot_account_id ?? 0);
     $linkedAccountUsers = [];
-    if ($record && $record->chatwoot_account_id) {
-        $aid = (int) $record->chatwoot_account_id;
+    $usersError         = null;
+    if ($previewAid > 0) {
         try {
-            $auList = broodleengage_apiRequest('GET', "/platform/api/v1/accounts/{$aid}/account_users", [], $platformToken, $baseUrl);
+            $auList = broodleengage_apiRequest('GET', "/platform/api/v1/accounts/{$previewAid}/account_users", [], $platformToken, $baseUrl);
             foreach (($auList['payload'] ?? $auList) as $au) {
                 $uid = (int) ($au['user_id'] ?? $au['id'] ?? 0);
                 if (!$uid) continue;
@@ -1192,7 +1194,9 @@ function broodleengage_AdminServicesTabFields(array $params): array
                     ];
                 } catch (Exception $e) {}
             }
-        } catch (Exception $e) {}
+        } catch (Exception $e) {
+            $usersError = $e->getMessage();
+        }
     }
 
     // ── Update banner (cached 6 hours) ────────────────────────────────────────
@@ -1294,19 +1298,32 @@ function broodleengage_AdminServicesTabFields(array $params): array
     $currentLinkedId = $record ? (int) $record->chatwoot_account_id : 0;
     $savedUserId     = $record ? (int) $record->chatwoot_user_id    : 0;
 
+    // Build the "Load Users" URL for the current page
+    $currentPageUrl = strtok($_SERVER['REQUEST_URI'] ?? '', '?');
+    $loadUsersBase  = $currentPageUrl . '?' . http_build_query(array_filter([
+        'userid'    => $_GET['userid']    ?? null,
+        'id'        => $_GET['id']        ?? null,
+        'serviceid' => $_GET['serviceid'] ?? null,
+    ]));
+
     $html .= '<div class="be-picker-box">
         <h4>🔧 Assign / Change Chatwoot Account</h4>
-        <p>Enter the Chatwoot Account ID to link it to this service. The user list will load automatically. Select a user for SSO &amp; stats, then click <strong>Save Changes</strong>.</p>';
+        <p>Enter the Chatwoot Account ID, click <strong>Load Users</strong> to fetch its users, select a user for SSO &amp; stats, then click <strong>Save Changes</strong>.</p>';
 
-    // Account ID input
+    // Account ID input + Load Users button
     $html .= '<label style="display:block;font-size:11px;font-weight:600;color:#374151;margin-bottom:5px;">Chatwoot Account ID</label>';
-    $html .= '<input type="number" class="be-inp" id="be_account_id_input" placeholder="e.g. 3" min="1" value="' . ($currentLinkedId ?: '') . '" oninput="beOnAccountIdInput(this)">';
+    $html .= '<div style="display:flex;gap:8px;margin-bottom:12px;">';
+    $html .= '<input type="number" class="be-inp" id="be_account_id_input" placeholder="e.g. 3" min="1" value="' . ($previewAid ?: '') . '" style="margin-bottom:0;flex:1;" oninput="beOnAccountIdInput(this)">';
+    $html .= '<button type="button" onclick="beLoadUsers()" style="padding:9px 16px;background:#6366f1;color:#fff;border:none;border-radius:7px;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;">Load Users</button>';
+    $html .= '</div>';
 
-    // User dropdown (populated by JS from embedded data or AJAX-like approach)
+    // User dropdown
     $html .= '<label style="display:block;font-size:11px;font-weight:600;color:#374151;margin-bottom:5px;">Select User (for SSO &amp; stats)</label>';
-    $html .= '<select class="be-sel" id="be_user_picker" onchange="beOnUserChange(this)">';
+    $html .= '<select class="be-sel" id="be_user_picker" onchange="beOnUserChange(this)"' . (empty($linkedAccountUsers) ? ' disabled' : '') . '>';
 
-    if (!empty($linkedAccountUsers)) {
+    if ($usersError) {
+        $html .= '<option value="">⚠ Error loading users — check Account ID</option>';
+    } elseif (!empty($linkedAccountUsers)) {
         $html .= '<option value="">— select a user —</option>';
         foreach ($linkedAccountUsers as $u) {
             $sel   = ((int)$u['id'] === $savedUserId) ? ' selected' : '';
@@ -1314,50 +1331,54 @@ function broodleengage_AdminServicesTabFields(array $params): array
             $html .= '<option value="' . (int)$u['id'] . '" data-email="' . htmlspecialchars($u['email'], ENT_QUOTES) . '" data-token="' . htmlspecialchars($u['access_token'], ENT_QUOTES) . '"' . $sel . '>' . $label . '</option>';
         }
     } else {
-        $html .= '<option value="">— enter an Account ID above first —</option>';
+        $html .= '<option value="">— click Load Users after entering an Account ID —</option>';
     }
     $html .= '</select>';
 
-    // Preview box (always visible when data is set)
-    $previewStyle = ($currentLinkedId && $savedUserId) ? '' : 'display:none;';
-    $prevEmail    = htmlspecialchars($record->chatwoot_email ?? '', ENT_QUOTES);
-    $prevToken    = $record->chatwoot_user_token ?? '';
-    $prevTokenShort = $prevToken ? substr($prevToken, 0, 24) . '…' : '—';
+    if ($usersError) {
+        $html .= '<div class="be-admin-alert error" style="margin-top:-8px;margin-bottom:12px;">⚠️ ' . htmlspecialchars($usersError) . '</div>';
+    }
+
+    // Preview box
+    $previewStyle   = ($previewAid && $savedUserId) ? '' : 'display:none;';
+    $prevEmail      = htmlspecialchars($record->chatwoot_email ?? '', ENT_QUOTES);
+    $prevToken      = $record->chatwoot_user_token ?? '';
+    $prevTokenShort = $prevToken ? substr($prevToken, 0, 24) . '...' : '—';
 
     $html .= '<div class="be-preview" id="be_preview" style="' . $previewStyle . '">
         <div style="font-size:11px;font-weight:700;color:#5b21b6;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;">Will be saved</div>
-        <div class="be-preview-row"><span class="be-preview-label">Account ID</span><span class="be-preview-value" id="be_prev_aid">' . ($currentLinkedId ? '#' . $currentLinkedId : '—') . '</span></div>
-        <div class="be-preview-row"><span class="be-preview-label">User ID</span><span class="be-preview-value" id="be_prev_uid">' . ($savedUserId ? '#' . $savedUserId : '—') . '</span></div>
+        <div class="be-preview-row"><span class="be-preview-label">Account ID</span><span class="be-preview-value" id="be_prev_aid">' . ($previewAid ? '#' . $previewAid : '&mdash;') . '</span></div>
+        <div class="be-preview-row"><span class="be-preview-label">User ID</span><span class="be-preview-value" id="be_prev_uid">' . ($savedUserId ? '#' . $savedUserId : '&mdash;') . '</span></div>
         <div class="be-preview-row"><span class="be-preview-label">User Email</span><span class="be-preview-value" id="be_prev_email">' . $prevEmail . '</span></div>
         <div class="be-preview-row"><span class="be-preview-label">User Token</span><span class="be-preview-value" id="be_prev_token">' . htmlspecialchars($prevTokenShort) . '</span></div>
     </div>';
 
     // Hidden inputs submitted with WHMCS Save Changes
-    $html .= '<input type="hidden" name="be_assign_account_id" id="be_assign_account_id" value="' . ($currentLinkedId ?: '') . '">';
+    $html .= '<input type="hidden" name="be_assign_account_id" id="be_assign_account_id" value="' . ($previewAid ?: '') . '">';
     $html .= '<input type="hidden" name="be_assign_user_id"    id="be_assign_user_id"    value="' . ($savedUserId ?: '') . '">';
     $html .= '<input type="hidden" name="be_assign_user_token" id="be_assign_user_token" value="' . htmlspecialchars($record->chatwoot_user_token ?? '', ENT_QUOTES) . '">';
     $html .= '<input type="hidden" name="be_assign_email"      id="be_assign_email"      value="' . htmlspecialchars($record->chatwoot_email ?? '', ENT_QUOTES) . '">';
 
     $html .= '<p style="margin-top:8px;font-size:11px;color:#9ca3af;">
-        💡 To find an Account ID: open Chatwoot → go to the account → the ID is in the URL: <code>/app/accounts/<strong>{ID}</strong>/dashboard</code>.<br>
-        After changing the Account ID, click <strong>Save Changes</strong> — the user list will refresh on next page load.
+        Account ID is in the Chatwoot URL: <code>/app/accounts/<strong>{ID}</strong>/dashboard</code>
     </p>';
 
+    // Build Load Users URL preserving existing query params
+    $qp = array_filter(['userid' => $_GET['userid'] ?? null, 'id' => $_GET['id'] ?? null, 'serviceid' => $_GET['serviceid'] ?? null]);
+    $loadUsersBase = strtok($_SERVER['REQUEST_URI'] ?? '', '?') . '?' . http_build_query($qp);
+    $jsLoadUrl     = addslashes($loadUsersBase);
+
     $html .= "<script>
+function beLoadUsers() {
+    var aid = parseInt(document.getElementById('be_account_id_input').value) || 0;
+    if (!aid) { alert('Please enter a Chatwoot Account ID first.'); return; }
+    window.location.href = '{$jsLoadUrl}&be_preview_aid=' + aid;
+}
 function beOnAccountIdInput(inp) {
     var aid = parseInt(inp.value) || 0;
     document.getElementById('be_assign_account_id').value = aid || '';
-    document.getElementById('be_prev_aid').textContent    = aid ? '#' + aid : '—';
-    // Clear user selection when account changes
-    document.getElementById('be_assign_user_id').value    = '';
-    document.getElementById('be_assign_user_token').value = '';
-    document.getElementById('be_assign_email').value      = '';
-    document.getElementById('be_prev_uid').textContent    = '—';
-    document.getElementById('be_prev_email').textContent  = '—';
-    document.getElementById('be_prev_token').textContent  = '—';
-    document.getElementById('be_preview').style.display   = aid ? 'block' : 'none';
+    document.getElementById('be_prev_aid').textContent    = aid ? '#' + aid : '\u2014';
 }
-
 function beOnUserChange(sel) {
     var opt = sel.options[sel.selectedIndex];
     if (!opt || !opt.value) return;
@@ -1365,16 +1386,14 @@ function beOnUserChange(sel) {
     document.getElementById('be_assign_email').value      = opt.dataset.email || '';
     document.getElementById('be_assign_user_token').value = opt.dataset.token || '';
     document.getElementById('be_prev_uid').textContent    = '#' + opt.value;
-    document.getElementById('be_prev_email').textContent  = opt.dataset.email || '—';
+    document.getElementById('be_prev_email').textContent  = opt.dataset.email || '\u2014';
     var tok = opt.dataset.token || '';
-    document.getElementById('be_prev_token').textContent  = tok ? tok.substring(0, 24) + '…' : '—';
+    document.getElementById('be_prev_token').textContent  = tok ? tok.substring(0, 24) + '...' : '\u2014';
     document.getElementById('be_preview').style.display   = 'block';
 }
-
-// Auto-trigger user change on load if a user is already selected
 (function() {
-    var userSel = document.getElementById('be_user_picker');
-    if (userSel && userSel.value) { beOnUserChange(userSel); }
+    var s = document.getElementById('be_user_picker');
+    if (s && s.value) { beOnUserChange(s); }
 })();
 </script>";
 
