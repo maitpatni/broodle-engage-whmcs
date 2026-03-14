@@ -30,7 +30,7 @@
  *
  * @author  Broodle <https://broodle.host>
  * @link    https://engage.broodle.one
- * @version 2.0.0
+ * @version 2.0.1
  *
  * Auto-update: tags releases on https://github.com/maitpatni/broodle-engage-whmcs
  * WHMCS admin can check for and apply updates from the server module page.
@@ -46,7 +46,7 @@ use WHMCS\Database\Capsule;
 // UPDATE CHECKER CONSTANTS
 // ─────────────────────────────────────────────────────────────────────────────
 
-define('BROODLEENGAGE_VERSION',      '2.0.0');
+define('BROODLEENGAGE_VERSION',      '2.0.1');
 define('BROODLEENGAGE_GITHUB_REPO',  'maitpatni/broodle-engage-whmcs');
 define('BROODLEENGAGE_MODULE_DIR',   __DIR__);
 
@@ -785,7 +785,7 @@ function broodleengage_fetchLatestRelease(): array
  * Download the release zip, extract it, and overwrite module files.
  * Returns a status message string.
  */
-function broodleengage_applyUpdate(string $zipUrl, string $newVersion): string
+function broodleengage_doApplyUpdate(string $zipUrl, string $newVersion): string
 {
     $moduleDir = BROODLEENGAGE_MODULE_DIR;
     $tmpZip    = sys_get_temp_dir() . '/broodleengage_update_' . time() . '.zip';
@@ -1030,7 +1030,7 @@ function broodleengage_ApplyUpdate(array $params): array
             throw new Exception('Module directory is not writable: ' . BROODLEENGAGE_MODULE_DIR . '. Check file permissions (should be writable by the web server user).');
         }
 
-        $msg = broodleengage_applyUpdate($zipUrl, $latest);
+        $msg = broodleengage_doApplyUpdate($zipUrl, $latest);
 
         logModuleCall('broodleengage', 'ApplyUpdate',
             ['from' => BROODLEENGAGE_VERSION, 'to' => $latest], [], $msg, []
