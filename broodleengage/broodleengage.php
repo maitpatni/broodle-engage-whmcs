@@ -30,7 +30,7 @@
  *
  * @author  Broodle <https://broodle.host>
  * @link    https://engage.broodle.one
- * @version 2.0.1
+ * @version 2.0.3
  *
  * Auto-update: tags releases on https://github.com/maitpatni/broodle-engage-whmcs
  * WHMCS admin can check for and apply updates from the server module page.
@@ -46,9 +46,10 @@ use WHMCS\Database\Capsule;
 // UPDATE CHECKER CONSTANTS
 // ─────────────────────────────────────────────────────────────────────────────
 
-define('BROODLEENGAGE_VERSION',      '2.0.1');
+define('BROODLEENGAGE_VERSION',      '2.0.3');
 define('BROODLEENGAGE_GITHUB_REPO',  'maitpatni/broodle-engage-whmcs');
 define('BROODLEENGAGE_MODULE_DIR',   __DIR__);
+define('BROODLEENGAGE_UPDATE_CACHE', __DIR__ . '/.update_cache.json');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // META DATA
@@ -751,6 +752,7 @@ function broodleengage_fetchLatestRelease(): array
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_TIMEOUT        => 15,
         CURLOPT_SSL_VERIFYPEER => true,
+        CURLOPT_FOLLOWLOCATION => true,
         CURLOPT_HTTPHEADER     => [
             'User-Agent: BroodleEngage-WHMCS-Module/' . BROODLEENGAGE_VERSION,
             'Accept: application/vnd.github+json',
@@ -765,18 +767,20 @@ function broodleengage_fetchLatestRelease(): array
         throw new Exception('GitHub API cURL error: ' . $curlErr);
     }
     if ($httpCode !== 200) {
-        throw new Exception('GitHub API returned HTTP ' . $httpCode);
+        throw new Exception('GitHub API returned HTTP ' . $httpCode . '. Response: ' . substr($response, 0, 200));
     }
 
     $data = json_decode($response, true);
     if (empty($data['tag_name'])) {
-        throw new Exception('Could not parse GitHub release response.');
+        throw new Exception('Could not parse GitHub release response: ' . substr($response, 0, 200));
     }
 
-    $tag     = $data['tag_name'];                          // e.g. v2.1.0
-    $version = ltrim($tag, 'v');                           // e.g. 2.1.0
-    $zipUrl  = $data['zipball_url'] ?? '';
+    $tag     = $data['tag_name'];       // e.g. v2.1.0
+    $version = ltrim($tag, 'v');        // e.g. 2.1.0
     $body    = $data['body'] ?? '';
+
+    // Use the direct zipball URL — GitHub redirects this to S3, we follow with CURLOPT_FOLLOWLOCATION
+    $zipUrl = 'https://github.com/' . BROODLEENGAGE_GITHUB_REPO . '/archive/refs/tags/' . $tag . '.zip';
 
     return compact('tag', 'version', 'zipUrl', 'body');
 }
@@ -788,17 +792,19 @@ function broodleengage_fetchLatestRelease(): array
 function broodleengage_doApplyUpdate(string $zipUrl, string $newVersion): string
 {
     $moduleDir = BROODLEENGAGE_MODULE_DIR;
-    $tmpZip    = sys_get_temp_dir() . '/broodleengage_update_' . time() . '.zip';
-    $tmpDir    = sys_get_temp_dir() . '/broodleengage_update_' . time() . '/';
+    $ts        = time();
+    $tmpZip    = sys_get_temp_dir() . '/broodleengage_update_' . $ts . '.zip';
+    $tmpDir    = sys_get_temp_dir() . '/broodleengage_update_' . $ts;
 
     // ── 1. Download zip ───────────────────────────────────────────────────────
     $ch = curl_init();
     curl_setopt_array($ch, [
         CURLOPT_URL            => $zipUrl,
         CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_TIMEOUT        => 60,
+        CURLOPT_TIMEOUT        => 120,
         CURLOPT_SSL_VERIFYPEER => true,
         CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_MAXREDIRS      => 5,
         CURLOPT_HTTPHEADER     => [
             'User-Agent: BroodleEngage-WHMCS-Module/' . BROODLEENGAGE_VERSION,
         ],
@@ -812,38 +818,60 @@ function broodleengage_doApplyUpdate(string $zipUrl, string $newVersion): string
         throw new Exception('Download failed: ' . $curlErr);
     }
     if ($httpCode !== 200 || empty($zipData)) {
-        throw new Exception('Download returned HTTP ' . $httpCode);
+        throw new Exception('Download returned HTTP ' . $httpCode . ' from ' . $zipUrl);
     }
 
-    file_put_contents($tmpZip, $zipData);
+    if (file_put_contents($tmpZip, $zipData) === false) {
+        throw new Exception('Could not write zip to temp dir: ' . sys_get_temp_dir());
+    }
 
     // ── 2. Extract zip ────────────────────────────────────────────────────────
-    $zip = new ZipArchive();
-    if ($zip->open($tmpZip) !== true) {
+    if (!class_exists('ZipArchive')) {
         @unlink($tmpZip);
-        throw new Exception('Could not open downloaded zip archive.');
+        throw new Exception('PHP ZipArchive extension is not available on this server.');
+    }
+
+    $zip = new ZipArchive();
+    $res = $zip->open($tmpZip);
+    if ($res !== true) {
+        @unlink($tmpZip);
+        throw new Exception('Could not open zip archive (ZipArchive error code: ' . $res . ').');
     }
     @mkdir($tmpDir, 0755, true);
     $zip->extractTo($tmpDir);
     $zip->close();
     @unlink($tmpZip);
 
-    // GitHub zips have a top-level folder like "maitpatni-broodle-engage-whmcs-abc1234/"
-    // Find the broodleengage/ subfolder inside it
-    $extracted = glob($tmpDir . '*/broodleengage/');
-    if (empty($extracted)) {
-        broodleengage_rrmdir($tmpDir);
-        throw new Exception('Could not locate broodleengage/ folder inside the release zip.');
+    // ── 3. Find the broodleengage/ subfolder ──────────────────────────────────
+    // GitHub archive structure: broodle-engage-whmcs-2.0.3/broodleengage/
+    // We search recursively for the first directory named "broodleengage"
+    $srcDir = null;
+    $iter   = new RecursiveIteratorIterator(
+        new RecursiveDirectoryIterator($tmpDir, FilesystemIterator::SKIP_DOTS),
+        RecursiveIteratorIterator::SELF_FIRST
+    );
+    foreach ($iter as $path => $info) {
+        if ($info->isDir() && $info->getFilename() === 'broodleengage') {
+            $srcDir = $path . DIRECTORY_SEPARATOR;
+            break;
+        }
     }
-    $srcDir = $extracted[0]; // e.g. /tmp/broodleengage_update_xxx/maitpatni-broodle-engage-whmcs-abc/broodleengage/
 
-    // ── 3. Copy new files over existing module ────────────────────────────────
-    broodleengage_rcopy($srcDir, $moduleDir . '/');
+    if (!$srcDir) {
+        broodleengage_rrmdir($tmpDir);
+        throw new Exception('Could not locate broodleengage/ folder inside the downloaded zip. Contents: ' . implode(', ', array_slice(scandir($tmpDir), 2, 10)));
+    }
 
-    // ── 4. Clean up temp dir ──────────────────────────────────────────────────
+    // ── 4. Copy new files over existing module ────────────────────────────────
+    broodleengage_rcopy($srcDir, $moduleDir . DIRECTORY_SEPARATOR);
+
+    // ── 5. Clean up ───────────────────────────────────────────────────────────
     broodleengage_rrmdir($tmpDir);
 
-    return "Module updated to v{$newVersion} successfully. Reload this page to see the new version.";
+    // Clear the update cache so the banner refreshes on next page load
+    @unlink(BROODLEENGAGE_UPDATE_CACHE);
+
+    return "Module updated to v{$newVersion} successfully. Please reload this page.";
 }
 
 /** Recursive copy helper */
@@ -966,29 +994,28 @@ function broodleengage_ResetPassword(array $params)
 function broodleengage_CheckForUpdates(array $params): array
 {
     try {
-        $release    = broodleengage_fetchLatestRelease();
-        $latest     = $release['version'];
-        $current    = BROODLEENGAGE_VERSION;
-        $isNewer    = version_compare($latest, $current, '>');
-        $notes      = trim($release['body']);
-        $notesHtml  = $notes ? '<br><br><strong>Release notes:</strong><br>' . nl2br(htmlspecialchars($notes)) : '';
+        $release   = broodleengage_fetchLatestRelease();
+        $latest    = $release['version'];
+        $current   = BROODLEENGAGE_VERSION;
+        $isNewer   = version_compare($latest, $current, '>');
+        $notes     = trim($release['body']);
+        $notesHtml = $notes ? '<br><br><strong>Release notes:</strong><br>' . nl2br(htmlspecialchars($notes)) : '';
+
+        // Always persist cache so the banner on the tab also updates
+        file_put_contents(BROODLEENGAGE_UPDATE_CACHE,
+            json_encode(['version' => $latest, 'zip_url' => $release['zipUrl'], 'ts' => time()]));
 
         if ($isNewer) {
-            // Cache the zip URL in a temp file so ApplyUpdate can use it without re-fetching
-            file_put_contents(
-                sys_get_temp_dir() . '/broodleengage_pending_update.json',
-                json_encode(['version' => $latest, 'zip_url' => $release['zipUrl'], 'ts' => time()])
-            );
             return [
                 'status'      => 'success',
-                'description' => "Update available: v{$latest} (installed: v{$current}). "
+                'description' => "✅ Update available: v{$latest} (you have v{$current}). "
                     . "Click <strong>Apply Update</strong> to install it now.{$notesHtml}",
             ];
         }
 
         return [
             'status'      => 'success',
-            'description' => "You are running the latest version (v{$current}).",
+            'description' => "✅ You are running the latest version (v{$current}). Latest on GitHub: v{$latest}.",
         ];
 
     } catch (Exception $e) {
@@ -999,42 +1026,29 @@ function broodleengage_CheckForUpdates(array $params): array
 function broodleengage_ApplyUpdate(array $params): array
 {
     try {
-        $cacheFile = sys_get_temp_dir() . '/broodleengage_pending_update.json';
-
-        if (!file_exists($cacheFile)) {
-            // No cached result — do a fresh check first
-            $release = broodleengage_fetchLatestRelease();
-            $latest  = $release['version'];
-            if (!version_compare($latest, BROODLEENGAGE_VERSION, '>')) {
-                return ['status' => 'success', 'description' => 'Already on the latest version (v' . BROODLEENGAGE_VERSION . '). Nothing to update.'];
-            }
-            $zipUrl = $release['zipUrl'];
-        } else {
-            $cached = json_decode(file_get_contents($cacheFile), true);
-            // Expire cache after 1 hour
-            if ((time() - ($cached['ts'] ?? 0)) > 3600) {
-                $release = broodleengage_fetchLatestRelease();
-                $cached  = ['version' => $release['version'], 'zip_url' => $release['zipUrl']];
-            }
-            $latest = $cached['version'];
-            $zipUrl = $cached['zip_url'];
-            @unlink($cacheFile);
-        }
+        // Always do a fresh fetch to get the real latest version + zip URL
+        $release = broodleengage_fetchLatestRelease();
+        $latest  = $release['version'];
+        $zipUrl  = $release['zipUrl'];
 
         if (!version_compare($latest, BROODLEENGAGE_VERSION, '>')) {
-            return ['status' => 'success', 'description' => 'Already on the latest version (v' . BROODLEENGAGE_VERSION . '). Nothing to update.'];
+            return [
+                'status'      => 'success',
+                'description' => 'Already on the latest version (v' . BROODLEENGAGE_VERSION . '). Nothing to update.',
+            ];
         }
 
-        // Verify the module directory is writable before attempting
         if (!is_writable(BROODLEENGAGE_MODULE_DIR)) {
-            throw new Exception('Module directory is not writable: ' . BROODLEENGAGE_MODULE_DIR . '. Check file permissions (should be writable by the web server user).');
+            throw new Exception(
+                'Module directory is not writable: ' . BROODLEENGAGE_MODULE_DIR .
+                '. Fix permissions (chmod 755 or chown to web server user) and try again.'
+            );
         }
 
         $msg = broodleengage_doApplyUpdate($zipUrl, $latest);
 
         logModuleCall('broodleengage', 'ApplyUpdate',
-            ['from' => BROODLEENGAGE_VERSION, 'to' => $latest], [], $msg, []
-        );
+            ['from' => BROODLEENGAGE_VERSION, 'to' => $latest], [], $msg, []);
 
         return ['status' => 'success', 'description' => $msg];
 
@@ -1209,15 +1223,12 @@ function broodleengage_AdminServicesTabFields(array $params): array
 
     // ── Update banner (cached 6 hours) ────────────────────────────────────────
     $updateBanner    = '';
-    $updateCacheFile = sys_get_temp_dir() . '/broodleengage_update_check.json';
-    $updateCache     = file_exists($updateCacheFile) ? json_decode(file_get_contents($updateCacheFile), true) : null;
+    $updateCache     = file_exists(BROODLEENGAGE_UPDATE_CACHE) ? json_decode(file_get_contents(BROODLEENGAGE_UPDATE_CACHE), true) : null;
     if (!$updateCache || (time() - ($updateCache['ts'] ?? 0)) > 21600) {
         try {
             $rel         = broodleengage_fetchLatestRelease();
             $updateCache = ['version' => $rel['version'], 'zip_url' => $rel['zipUrl'], 'ts' => time()];
-            file_put_contents($updateCacheFile, json_encode($updateCache));
-            file_put_contents(sys_get_temp_dir() . '/broodleengage_pending_update.json',
-                json_encode(['version' => $rel['version'], 'zip_url' => $rel['zipUrl'], 'ts' => time()]));
+            file_put_contents(BROODLEENGAGE_UPDATE_CACHE, json_encode($updateCache));
         } catch (Exception $e) { $updateCache = null; }
     }
     if ($updateCache && version_compare($updateCache['version'], BROODLEENGAGE_VERSION, '>')) {
