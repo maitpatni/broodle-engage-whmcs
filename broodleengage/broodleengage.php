@@ -30,7 +30,7 @@
  *
  * @author  Broodle <https://broodle.host>
  * @link    https://engage.broodle.one
- * @version 2.0.3
+ * @version 2.1.0
  *
  * Auto-update: tags releases on https://github.com/maitpatni/broodle-engage-whmcs
  * WHMCS admin can check for and apply updates from the server module page.
@@ -46,7 +46,7 @@ use WHMCS\Database\Capsule;
 // UPDATE CHECKER CONSTANTS
 // ─────────────────────────────────────────────────────────────────────────────
 
-define('BROODLEENGAGE_VERSION',      '2.0.3');
+define('BROODLEENGAGE_VERSION',      '2.1.0');
 define('BROODLEENGAGE_GITHUB_REPO',  'maitpatni/broodle-engage-whmcs');
 define('BROODLEENGAGE_MODULE_DIR',   __DIR__);
 define('BROODLEENGAGE_UPDATE_CACHE', __DIR__ . '/.update_cache.json');
@@ -1124,15 +1124,7 @@ function broodleengage_TestConnection(array $params)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ADMIN SERVICES TAB  — "Broodle Engage" tab on /admin/clientsservices.php
-// Lets admin look up an existing Chatwoot account by ID and assign it to the
-// service, or view stats for the currently linked account.
-// ─────────────────────────────────────────────────────────────────────────────
-
-
-// ─────────────────────────────────────────────────────────────────────────────
-// ADMIN SERVICES TAB
-// Fetches all Chatwoot accounts + their users via Platform API and renders
-// a dropdown picker so the admin can assign any account to this service.
+// Admin can enter a Chatwoot Account ID to link/change the account for a service.
 // ─────────────────────────────────────────────────────────────────────────────
 
 function broodleengage_AdminServicesTabFields(array $params): array
@@ -1144,48 +1136,7 @@ function broodleengage_AdminServicesTabFields(array $params): array
     $platformToken = $params['serveraccesshash'];
     $record        = Capsule::table('mod_broodleengage')->where('service_id', $serviceId)->first();
 
-    // ── Fetch all Chatwoot accounts via Platform API ───────────────────────────
-    $allAccounts   = [];
-    $accountsError = null;
-    try {
-        for ($page = 1; $page <= 5; $page++) {
-            $resp  = broodleengage_apiRequest('GET', "/platform/api/v1/accounts?page={$page}", [], $platformToken, $baseUrl);
-            $items = $resp['payload'] ?? $resp;
-            if (empty($items) || !is_array($items)) break;
-            foreach ($items as $acc) {
-                if (!empty($acc['id'])) $allAccounts[] = $acc;
-            }
-            if (count($items) < 100) break;
-        }
-    } catch (Exception $e) {
-        $accountsError = $e->getMessage();
-    }
-
-    // ── For each account fetch its users (id, name, email, access_token, role) ─
-    $accountUsers = [];
-    foreach ($allAccounts as $acc) {
-        $aid = (int) $acc['id'];
-        try {
-            $auList = broodleengage_apiRequest('GET', "/platform/api/v1/accounts/{$aid}/account_users", [], $platformToken, $baseUrl);
-            $accountUsers[$aid] = [];
-            foreach (($auList['payload'] ?? $auList) as $au) {
-                $uid = (int) ($au['user_id'] ?? $au['id'] ?? 0);
-                if (!$uid) continue;
-                try {
-                    $ud = broodleengage_apiRequest('GET', "/platform/api/v1/users/{$uid}", [], $platformToken, $baseUrl);
-                    $accountUsers[$aid][] = [
-                        'id'           => $uid,
-                        'name'         => $ud['name']         ?? '',
-                        'email'        => $ud['email']        ?? '',
-                        'access_token' => $ud['access_token'] ?? '',
-                        'role'         => $au['role']         ?? 'agent',
-                    ];
-                } catch (Exception $e) {}
-            }
-        } catch (Exception $e) {}
-    }
-
-    // ── If a record exists, fetch live stats using platform token ─────────────
+    // ── Fetch live stats for currently linked account ─────────────────────────
     $accountInfo  = null;
     $agentCount   = null;
     $inboxCount   = null;
@@ -1221,9 +1172,33 @@ function broodleengage_AdminServicesTabFields(array $params): array
         }
     }
 
+    // ── Fetch users for the currently linked account (for the user picker) ────
+    $linkedAccountUsers = [];
+    if ($record && $record->chatwoot_account_id) {
+        $aid = (int) $record->chatwoot_account_id;
+        try {
+            $auList = broodleengage_apiRequest('GET', "/platform/api/v1/accounts/{$aid}/account_users", [], $platformToken, $baseUrl);
+            foreach (($auList['payload'] ?? $auList) as $au) {
+                $uid = (int) ($au['user_id'] ?? $au['id'] ?? 0);
+                if (!$uid) continue;
+                try {
+                    $ud = broodleengage_apiRequest('GET', "/platform/api/v1/users/{$uid}", [], $platformToken, $baseUrl);
+                    $linkedAccountUsers[] = [
+                        'id'           => $uid,
+                        'name'         => $ud['name']         ?? '',
+                        'email'        => $ud['email']        ?? '',
+                        'access_token' => $ud['access_token'] ?? '',
+                        'role'         => $au['role']         ?? 'agent',
+                    ];
+                } catch (Exception $e) {}
+            }
+        } catch (Exception $e) {}
+    }
+
     // ── Update banner (cached 6 hours) ────────────────────────────────────────
-    $updateBanner    = '';
-    $updateCache     = file_exists(BROODLEENGAGE_UPDATE_CACHE) ? json_decode(file_get_contents(BROODLEENGAGE_UPDATE_CACHE), true) : null;
+    $updateBanner = '';
+    $updateCache  = file_exists(BROODLEENGAGE_UPDATE_CACHE)
+        ? json_decode(file_get_contents(BROODLEENGAGE_UPDATE_CACHE), true) : null;
     if (!$updateCache || (time() - ($updateCache['ts'] ?? 0)) > 21600) {
         try {
             $rel         = broodleengage_fetchLatestRelease();
@@ -1263,9 +1238,11 @@ function broodleengage_AdminServicesTabFields(array $params): array
 .be-picker-box{background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:18px 20px;margin-bottom:16px;}
 .be-picker-box h4{margin:0 0 10px;font-size:13px;font-weight:700;color:#374151;text-transform:uppercase;letter-spacing:.05em;}
 .be-picker-box p{font-size:12px;color:#6b7280;margin:0 0 12px;line-height:1.5;}
+.be-inp{width:100%;border:1px solid #d1d5db;border-radius:7px;padding:9px 12px;font-size:13px;background:#fff;color:#111827;margin-bottom:12px;box-sizing:border-box;}
+.be-inp:focus{outline:2px solid #6366f1;border-color:#6366f1;}
 .be-sel{width:100%;border:1px solid #d1d5db;border-radius:7px;padding:9px 12px;font-size:13px;background:#fff;color:#111827;margin-bottom:12px;box-sizing:border-box;}
 .be-sel:focus{outline:2px solid #6366f1;border-color:#6366f1;}
-.be-preview{background:#fff;border:1px solid #c4b5fd;border-radius:8px;padding:14px 16px;margin-bottom:12px;display:none;}
+.be-preview{background:#fff;border:1px solid #c4b5fd;border-radius:8px;padding:14px 16px;margin-bottom:12px;}
 .be-preview-row{display:flex;justify-content:space-between;font-size:12px;padding:4px 0;border-bottom:1px solid #f3f4f6;}
 .be-preview-row:last-child{border-bottom:none;}
 .be-preview-label{color:#6b7280;}
@@ -1286,7 +1263,7 @@ function broodleengage_AdminServicesTabFields(array $params): array
         $statusClass = $status === 'active' ? 'active' : ($status === 'suspended' ? 'suspended' : 'na');
 
         if ($fetchError) {
-            $html .= '<div class="be-admin-alert error">⚠️ Could not fetch live stats: ' . htmlspecialchars($fetchError) . '</div>';
+            $html .= '<div class="be-admin-alert error">⚠️ Could not fetch live account data: ' . htmlspecialchars($fetchError) . '</div>';
         }
 
         $html .= '<div class="be-admin-section">
@@ -1313,102 +1290,72 @@ function broodleengage_AdminServicesTabFields(array $params): array
         $html .= '<div class="be-admin-alert warn">⚠️ No Chatwoot account is currently linked to this service.</div>';
     }
 
-    // ── Account picker ────────────────────────────────────────────────────────
-    if ($accountsError) {
-        $html .= '<div class="be-admin-alert error">⚠️ Could not fetch accounts from Chatwoot: ' . htmlspecialchars($accountsError) . '</div>';
-    }
-
+    // ── Account assignment form ───────────────────────────────────────────────
     $currentLinkedId = $record ? (int) $record->chatwoot_account_id : 0;
     $savedUserId     = $record ? (int) $record->chatwoot_user_id    : 0;
 
     $html .= '<div class="be-picker-box">
-        <h4>🔧 Assign Chatwoot Account</h4>
-        <p>Select an account from your Chatwoot instance. Then pick the user for SSO and live stats. All hidden fields are filled automatically — just click Save Changes.</p>';
+        <h4>🔧 Assign / Change Chatwoot Account</h4>
+        <p>Enter the Chatwoot Account ID to link it to this service. The user list will load automatically. Select a user for SSO &amp; stats, then click <strong>Save Changes</strong>.</p>';
 
-    if (!empty($allAccounts)) {
-        // Account dropdown
-        $html .= '<label style="display:block;font-size:11px;font-weight:600;color:#374151;margin-bottom:5px;">Select Account</label>';
-        $html .= '<select class="be-sel" id="be_account_picker" onchange="beOnAccountChange(this)">';
-        $html .= '<option value="">— choose an account —</option>';
-        foreach ($allAccounts as $acc) {
-            $aid      = (int) $acc['id'];
-            $aname    = htmlspecialchars($acc['name'] ?? 'Account #' . $aid);
-            $astatus  = $acc['status'] ?? '';
-            $selected = ($aid === $currentLinkedId) ? ' selected' : '';
-            $html    .= "<option value=\"{$aid}\"{$selected}>[#{$aid}] {$aname} ({$astatus})</option>";
+    // Account ID input
+    $html .= '<label style="display:block;font-size:11px;font-weight:600;color:#374151;margin-bottom:5px;">Chatwoot Account ID</label>';
+    $html .= '<input type="number" class="be-inp" id="be_account_id_input" placeholder="e.g. 3" min="1" value="' . ($currentLinkedId ?: '') . '" oninput="beOnAccountIdInput(this)">';
+
+    // User dropdown (populated by JS from embedded data or AJAX-like approach)
+    $html .= '<label style="display:block;font-size:11px;font-weight:600;color:#374151;margin-bottom:5px;">Select User (for SSO &amp; stats)</label>';
+    $html .= '<select class="be-sel" id="be_user_picker" onchange="beOnUserChange(this)">';
+
+    if (!empty($linkedAccountUsers)) {
+        $html .= '<option value="">— select a user —</option>';
+        foreach ($linkedAccountUsers as $u) {
+            $sel   = ((int)$u['id'] === $savedUserId) ? ' selected' : '';
+            $label = htmlspecialchars('[#' . $u['id'] . '] ' . $u['name'] . ' <' . $u['email'] . '> (' . $u['role'] . ')');
+            $html .= '<option value="' . (int)$u['id'] . '" data-email="' . htmlspecialchars($u['email'], ENT_QUOTES) . '" data-token="' . htmlspecialchars($u['access_token'], ENT_QUOTES) . '"' . $sel . '>' . $label . '</option>';
         }
-        $html .= '</select>';
+    } else {
+        $html .= '<option value="">— enter an Account ID above first —</option>';
+    }
+    $html .= '</select>';
 
-        // User dropdown (populated by JS)
-        $html .= '<label style="display:block;font-size:11px;font-weight:600;color:#374151;margin-bottom:5px;">Select User (for SSO &amp; stats)</label>';
-        $html .= '<select class="be-sel" id="be_user_picker" onchange="beOnUserChange(this)" disabled>';
-        $html .= '<option value="">— select an account first —</option>';
-        $html .= '</select>';
+    // Preview box (always visible when data is set)
+    $previewStyle = ($currentLinkedId && $savedUserId) ? '' : 'display:none;';
+    $prevEmail    = htmlspecialchars($record->chatwoot_email ?? '', ENT_QUOTES);
+    $prevToken    = $record->chatwoot_user_token ?? '';
+    $prevTokenShort = $prevToken ? substr($prevToken, 0, 24) . '…' : '—';
 
-        // Preview box
-        $html .= '<div class="be-preview" id="be_preview">
-            <div style="font-size:11px;font-weight:700;color:#5b21b6;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;">Will be saved</div>
-            <div class="be-preview-row"><span class="be-preview-label">Account ID</span><span class="be-preview-value" id="be_prev_aid">—</span></div>
-            <div class="be-preview-row"><span class="be-preview-label">Account Name</span><span class="be-preview-value" id="be_prev_aname">—</span></div>
-            <div class="be-preview-row"><span class="be-preview-label">User ID</span><span class="be-preview-value" id="be_prev_uid">—</span></div>
-            <div class="be-preview-row"><span class="be-preview-label">User Email</span><span class="be-preview-value" id="be_prev_email">—</span></div>
-            <div class="be-preview-row"><span class="be-preview-label">User Token</span><span class="be-preview-value" id="be_prev_token">—</span></div>
-        </div>';
+    $html .= '<div class="be-preview" id="be_preview" style="' . $previewStyle . '">
+        <div style="font-size:11px;font-weight:700;color:#5b21b6;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;">Will be saved</div>
+        <div class="be-preview-row"><span class="be-preview-label">Account ID</span><span class="be-preview-value" id="be_prev_aid">' . ($currentLinkedId ? '#' . $currentLinkedId : '—') . '</span></div>
+        <div class="be-preview-row"><span class="be-preview-label">User ID</span><span class="be-preview-value" id="be_prev_uid">' . ($savedUserId ? '#' . $savedUserId : '—') . '</span></div>
+        <div class="be-preview-row"><span class="be-preview-label">User Email</span><span class="be-preview-value" id="be_prev_email">' . $prevEmail . '</span></div>
+        <div class="be-preview-row"><span class="be-preview-label">User Token</span><span class="be-preview-value" id="be_prev_token">' . htmlspecialchars($prevTokenShort) . '</span></div>
+    </div>';
 
-        // Hidden inputs submitted with WHMCS Save Changes
-        $html .= '<input type="hidden" name="be_assign_account_id"   id="be_assign_account_id"   value="' . ($record ? (int)$record->chatwoot_account_id : '') . '">';
-        $html .= '<input type="hidden" name="be_assign_user_id"      id="be_assign_user_id"      value="' . ($record ? (int)$record->chatwoot_user_id    : '') . '">';
-        $html .= '<input type="hidden" name="be_assign_user_token"   id="be_assign_user_token"   value="' . htmlspecialchars($record->chatwoot_user_token ?? '', ENT_QUOTES) . '">';
-        $html .= '<input type="hidden" name="be_assign_email"        id="be_assign_email"        value="' . htmlspecialchars($record->chatwoot_email      ?? '', ENT_QUOTES) . '">';
+    // Hidden inputs submitted with WHMCS Save Changes
+    $html .= '<input type="hidden" name="be_assign_account_id" id="be_assign_account_id" value="' . ($currentLinkedId ?: '') . '">';
+    $html .= '<input type="hidden" name="be_assign_user_id"    id="be_assign_user_id"    value="' . ($savedUserId ?: '') . '">';
+    $html .= '<input type="hidden" name="be_assign_user_token" id="be_assign_user_token" value="' . htmlspecialchars($record->chatwoot_user_token ?? '', ENT_QUOTES) . '">';
+    $html .= '<input type="hidden" name="be_assign_email"      id="be_assign_email"      value="' . htmlspecialchars($record->chatwoot_email ?? '', ENT_QUOTES) . '">';
 
-        $html .= '<p style="margin-top:8px;font-size:11px;color:#9ca3af;">Click the main <strong>Save Changes</strong> button after selecting. Nothing in Chatwoot is modified.</p>';
+    $html .= '<p style="margin-top:8px;font-size:11px;color:#9ca3af;">
+        💡 To find an Account ID: open Chatwoot → go to the account → the ID is in the URL: <code>/app/accounts/<strong>{ID}</strong>/dashboard</code>.<br>
+        After changing the Account ID, click <strong>Save Changes</strong> — the user list will refresh on next page load.
+    </p>';
 
-        // Embed data + JS
-        $jsAccountUsers = json_encode($accountUsers);
-        $jsAccounts     = json_encode(array_column($allAccounts, null, 'id'));
-        $jsSavedUid     = (int) $savedUserId;
-
-        $html .= "<script>
-var beAccountUsers = {$jsAccountUsers};
-var beAccounts     = {$jsAccounts};
-
-function beOnAccountChange(sel) {
-    var aid     = parseInt(sel.value) || 0;
-    var userSel = document.getElementById('be_user_picker');
+    $html .= "<script>
+function beOnAccountIdInput(inp) {
+    var aid = parseInt(inp.value) || 0;
     document.getElementById('be_assign_account_id').value = aid || '';
-    document.getElementById('be_preview').style.display   = 'none';
-    userSel.innerHTML = '';
-
-    if (!aid) {
-        userSel.innerHTML = '<option value=\"\">— select an account first —</option>';
-        userSel.disabled  = true;
-        return;
-    }
-
-    var acc = beAccounts[aid] || {};
-    document.getElementById('be_prev_aid').textContent   = '#' + aid;
-    document.getElementById('be_prev_aname').textContent = acc.name || '—';
-
-    var users = beAccountUsers[aid] || [];
-    if (!users.length) {
-        userSel.innerHTML = '<option value=\"\">No users found for this account</option>';
-        userSel.disabled  = true;
-        return;
-    }
-
-    userSel.innerHTML = '<option value=\"\">— select a user —</option>';
-    users.forEach(function(u) {
-        var opt       = document.createElement('option');
-        opt.value     = u.id;
-        opt.textContent = '[#' + u.id + '] ' + u.name + ' <' + u.email + '> (' + u.role + ')';
-        opt.dataset.email = u.email;
-        opt.dataset.token = u.access_token;
-        userSel.appendChild(opt);
-    });
-    userSel.disabled = false;
-
-    // Auto-select first user
-    if (users.length) { userSel.selectedIndex = 1; beOnUserChange(userSel); }
+    document.getElementById('be_prev_aid').textContent    = aid ? '#' + aid : '—';
+    // Clear user selection when account changes
+    document.getElementById('be_assign_user_id').value    = '';
+    document.getElementById('be_assign_user_token').value = '';
+    document.getElementById('be_assign_email').value      = '';
+    document.getElementById('be_prev_uid').textContent    = '—';
+    document.getElementById('be_prev_email').textContent  = '—';
+    document.getElementById('be_prev_token').textContent  = '—';
+    document.getElementById('be_preview').style.display   = aid ? 'block' : 'none';
 }
 
 function beOnUserChange(sel) {
@@ -1424,29 +1371,12 @@ function beOnUserChange(sel) {
     document.getElementById('be_preview').style.display   = 'block';
 }
 
-// On load: if an account is already selected, populate user dropdown and re-select saved user
+// Auto-trigger user change on load if a user is already selected
 (function() {
-    var picker = document.getElementById('be_account_picker');
-    if (picker && picker.value) {
-        beOnAccountChange(picker);
-        var savedUid = {$jsSavedUid};
-        if (savedUid) {
-            var userSel = document.getElementById('be_user_picker');
-            for (var i = 0; i < userSel.options.length; i++) {
-                if (parseInt(userSel.options[i].value) === savedUid) {
-                    userSel.selectedIndex = i;
-                    beOnUserChange(userSel);
-                    break;
-                }
-            }
-        }
-    }
+    var userSel = document.getElementById('be_user_picker');
+    if (userSel && userSel.value) { beOnUserChange(userSel); }
 })();
 </script>";
-
-    } elseif (!$accountsError) {
-        $html .= '<div class="be-admin-alert warn">No accounts found on this Chatwoot instance.</div>';
-    }
 
     $html .= '</div></div>'; // .be-picker-box .be-admin-wrap
 
@@ -1457,13 +1387,35 @@ function broodleengage_AdminServicesTabFieldsSave(array $params): void
 {
     broodleengage_ensureTable();
 
-    $serviceId = (int) $params['serviceid'];
-    $accountId = (int) ($_POST['be_assign_account_id']  ?? 0);
-    $userId    = (int) ($_POST['be_assign_user_id']     ?? 0);
-    $userToken = trim($_POST['be_assign_user_token']    ?? '');
-    $email     = trim($_POST['be_assign_email']         ?? '');
+    $serviceId     = (int) $params['serviceid'];
+    $accountId     = (int) ($_POST['be_assign_account_id']  ?? 0);
+    $userId        = (int) ($_POST['be_assign_user_id']     ?? 0);
+    $userToken     = trim($_POST['be_assign_user_token']    ?? '');
+    $email         = trim($_POST['be_assign_email']         ?? '');
 
     if ($accountId <= 0) return;
+
+    // If no user was selected but we have an account ID, try to auto-fetch the first admin user
+    if (!$userId || !$userToken) {
+        try {
+            $baseUrl       = broodleengage_getApiBase($params);
+            $platformToken = $params['serveraccesshash'];
+            $auList = broodleengage_apiRequest('GET', "/platform/api/v1/accounts/{$accountId}/account_users", [], $platformToken, $baseUrl);
+            foreach (($auList['payload'] ?? $auList) as $au) {
+                $uid = (int) ($au['user_id'] ?? $au['id'] ?? 0);
+                if (!$uid) continue;
+                $ud = broodleengage_apiRequest('GET', "/platform/api/v1/users/{$uid}", [], $platformToken, $baseUrl);
+                if (!empty($ud['access_token'])) {
+                    $userId    = $uid;
+                    $userToken = $ud['access_token'];
+                    $email     = $email ?: ($ud['email'] ?? '');
+                    break;
+                }
+            }
+        } catch (Exception $e) {
+            logModuleCall('broodleengage', 'AdminServicesTabFieldsSave_autoUser', [], [], $e->getMessage(), []);
+        }
+    }
 
     $now    = date('Y-m-d H:i:s');
     $exists = Capsule::table('mod_broodleengage')->where('service_id', $serviceId)->exists();
@@ -1492,5 +1444,5 @@ function broodleengage_AdminServicesTabFieldsSave(array $params): void
     }
 
     logModuleCall('broodleengage', 'AdminServicesTabFieldsSave',
-        ['serviceid' => $serviceId, 'account_id' => $accountId], [], 'Account assigned via picker', []);
+        ['serviceid' => $serviceId, 'account_id' => $accountId, 'user_id' => $userId], [], 'Account assigned', []);
 }
