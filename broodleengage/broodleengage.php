@@ -30,7 +30,7 @@
  *
  * @author  Broodle <https://broodle.host>
  * @link    https://engage.broodle.one
- * @version 2.1.8
+ * @version 2.1.9
  *
  * Auto-update: tags releases on https://github.com/maitpatni/broodle-engage-whmcs
  * WHMCS admin can check for and apply updates from the server module page.
@@ -46,7 +46,7 @@ use WHMCS\Database\Capsule;
 // UPDATE CHECKER CONSTANTS
 // ─────────────────────────────────────────────────────────────────────────────
 
-define('BROODLEENGAGE_VERSION',      '2.1.8');
+define('BROODLEENGAGE_VERSION',      '2.1.9');
 define('BROODLEENGAGE_GITHUB_REPO',  'maitpatni/broodle-engage-whmcs');
 define('BROODLEENGAGE_MODULE_DIR',   __DIR__);
 define('BROODLEENGAGE_UPDATE_CACHE', __DIR__ . '/.update_cache.json');
