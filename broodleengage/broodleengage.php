@@ -30,7 +30,7 @@
  *
  * @author  Broodle <https://broodle.host>
  * @link    https://engage.broodle.one
- * @version 2.1.2
+ * @version 2.1.3
  *
  * Auto-update: tags releases on https://github.com/maitpatni/broodle-engage-whmcs
  * WHMCS admin can check for and apply updates from the server module page.
@@ -46,7 +46,7 @@ use WHMCS\Database\Capsule;
 // UPDATE CHECKER CONSTANTS
 // ─────────────────────────────────────────────────────────────────────────────
 
-define('BROODLEENGAGE_VERSION',      '2.1.2');
+define('BROODLEENGAGE_VERSION',      '2.1.3');
 define('BROODLEENGAGE_GITHUB_REPO',  'maitpatni/broodle-engage-whmcs');
 define('BROODLEENGAGE_MODULE_DIR',   __DIR__);
 define('BROODLEENGAGE_UPDATE_CACHE', __DIR__ . '/.update_cache.json');
@@ -142,7 +142,8 @@ function broodleengage_apiRequest(string $method, string $endpoint, array $data,
     $opts = [
         CURLOPT_URL            => $baseUrl . $endpoint,
         CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_TIMEOUT        => 30,
+        CURLOPT_TIMEOUT        => 10,
+        CURLOPT_CONNECTTIMEOUT => 5,
         CURLOPT_SSL_VERIFYPEER => true,
         CURLOPT_HTTPHEADER     => [
             'Content-Type: application/json',
@@ -927,7 +928,7 @@ function broodleengage_SyncStatus(array $params)
 
         $record = Capsule::table('mod_broodleengage')->where('service_id', $serviceId)->first();
         if (!$record) {
-            return ['status' => 'error', 'description' => 'No Broodle Engage account record found.'];
+            return 'No Broodle Engage account record found.';
         }
 
         $data         = broodleengage_apiRequest('GET', "/platform/api/v1/accounts/{$record->chatwoot_account_id}", [], $platformToken, $baseUrl);
@@ -938,10 +939,10 @@ function broodleengage_SyncStatus(array $params)
             'updated_at'      => date('Y-m-d H:i:s'),
         ]);
 
-        return ['status' => 'success', 'description' => "Chatwoot account status: {$remoteStatus}. Local record synced."];
+        return 'success';
 
     } catch (Exception $e) {
-        return ['status' => 'error', 'description' => $e->getMessage()];
+        return $e->getMessage();
     }
 }
 
@@ -953,11 +954,10 @@ function broodleengage_ResetPassword(array $params)
         $baseUrl       = broodleengage_getApiBase($params);
         $platformToken = $params['serveraccesshash'];
         $serviceId     = (int) $params['serviceid'];
-        $clientId      = (int) $params['userid'];
 
         $record = Capsule::table('mod_broodleengage')->where('service_id', $serviceId)->first();
         if (!$record) {
-            return ['status' => 'error', 'description' => 'No Broodle Engage account record found.'];
+            return 'No Broodle Engage account record found.';
         }
 
         $newPassword = broodleengage_generatePassword();
@@ -967,13 +967,11 @@ function broodleengage_ResetPassword(array $params)
             'password_confirmation' => $newPassword,
         ], $platformToken, $baseUrl);
 
-        // Update WHMCS service record
         Capsule::table('tblhosting')->where('id', $serviceId)->update([
             'password'   => encrypt($newPassword),
             'updated_at' => date('Y-m-d H:i:s'),
         ]);
 
-        // Email the client — id = service ID for product-type templates
         try {
             broodleengage_sendEmail('Broodle Engage Password Reset', $serviceId, [
                 'service_name' => 'Broodle Engage',
@@ -984,65 +982,77 @@ function broodleengage_ResetPassword(array $params)
             logModuleCall('broodleengage', 'ResetPassword_email', [], [], $e->getMessage(), []);
         }
 
-        return ['status' => 'success', 'description' => 'Password reset successfully. New credentials emailed to client.'];
+        return 'success';
 
     } catch (Exception $e) {
-        return ['status' => 'error', 'description' => $e->getMessage()];
+        return $e->getMessage();
     }
 }
 
-function broodleengage_CheckForUpdates(array $params): array
+function broodleengage_CheckForUpdates(array $params): string
 {
     try {
-        $release   = broodleengage_fetchLatestRelease();
-        $latest    = $release['version'];
-        $current   = BROODLEENGAGE_VERSION;
-        $isNewer   = version_compare($latest, $current, '>');
-        $notes     = trim($release['body']);
-        $notesHtml = $notes ? '<br><br><strong>Release notes:</strong><br>' . nl2br(htmlspecialchars($notes)) : '';
+        // Short timeout — GitHub API should respond quickly
+        $url = 'https://api.github.com/repos/' . BROODLEENGAGE_GITHUB_REPO . '/releases/latest';
+        $ch  = curl_init();
+        curl_setopt_array($ch, [
+            CURLOPT_URL            => $url,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT        => 10,
+            CURLOPT_CONNECTTIMEOUT => 5,
+            CURLOPT_SSL_VERIFYPEER => true,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_HTTPHEADER     => [
+                'User-Agent: BroodleEngage-WHMCS-Module/' . BROODLEENGAGE_VERSION,
+                'Accept: application/vnd.github+json',
+            ],
+        ]);
+        $response = curl_exec($ch);
+        $httpCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $curlErr  = curl_error($ch);
+        curl_close($ch);
 
-        // Always persist cache so the banner on the tab also updates
+        if ($curlErr) throw new Exception('GitHub API cURL error: ' . $curlErr);
+        if ($httpCode !== 200) throw new Exception('GitHub API returned HTTP ' . $httpCode);
+
+        $data = json_decode($response, true);
+        if (empty($data['tag_name'])) throw new Exception('Could not parse GitHub release response');
+
+        $latest = ltrim($data['tag_name'], 'v');
+        $zipUrl = 'https://github.com/' . BROODLEENGAGE_GITHUB_REPO . '/archive/refs/tags/' . $data['tag_name'] . '.zip';
+        $current = BROODLEENGAGE_VERSION;
+
         file_put_contents(BROODLEENGAGE_UPDATE_CACHE,
-            json_encode(['version' => $latest, 'zip_url' => $release['zipUrl'], 'ts' => time()]));
+            json_encode(['version' => $latest, 'zip_url' => $zipUrl, 'ts' => time()]));
 
-        if ($isNewer) {
-            return [
-                'status'      => 'success',
-                'description' => "✅ Update available: v{$latest} (you have v{$current}). "
-                    . "Click <strong>Apply Update</strong> to install it now.{$notesHtml}",
-            ];
+        if (version_compare($latest, $current, '>')) {
+            return "Update available: v{$latest} (installed: v{$current}). Click Apply Update to install.";
         }
 
-        return [
-            'status'      => 'success',
-            'description' => "✅ You are running the latest version (v{$current}). Latest on GitHub: v{$latest}.",
-        ];
+        return "Up to date. Running v{$current} (latest: v{$latest}).";
 
     } catch (Exception $e) {
-        return ['status' => 'error', 'description' => 'Update check failed: ' . $e->getMessage()];
+        return 'Update check failed: ' . $e->getMessage();
     }
 }
 
-function broodleengage_ApplyUpdate(array $params): array
+function broodleengage_ApplyUpdate(array $params): string
 {
+    // Allow long execution — download + extract can take time
+    @set_time_limit(300);
+    @ignore_user_abort(true);
+
     try {
-        // Always do a fresh fetch to get the real latest version + zip URL
         $release = broodleengage_fetchLatestRelease();
         $latest  = $release['version'];
         $zipUrl  = $release['zipUrl'];
 
         if (!version_compare($latest, BROODLEENGAGE_VERSION, '>')) {
-            return [
-                'status'      => 'success',
-                'description' => 'Already on the latest version (v' . BROODLEENGAGE_VERSION . '). Nothing to update.',
-            ];
+            return 'Already on the latest version (v' . BROODLEENGAGE_VERSION . '). Nothing to update.';
         }
 
         if (!is_writable(BROODLEENGAGE_MODULE_DIR)) {
-            throw new Exception(
-                'Module directory is not writable: ' . BROODLEENGAGE_MODULE_DIR .
-                '. Fix permissions (chmod 755 or chown to web server user) and try again.'
-            );
+            return 'Module directory is not writable: ' . BROODLEENGAGE_MODULE_DIR . '. Fix permissions and try again.';
         }
 
         $msg = broodleengage_doApplyUpdate($zipUrl, $latest);
@@ -1050,11 +1060,11 @@ function broodleengage_ApplyUpdate(array $params): array
         logModuleCall('broodleengage', 'ApplyUpdate',
             ['from' => BROODLEENGAGE_VERSION, 'to' => $latest], [], $msg, []);
 
-        return ['status' => 'success', 'description' => $msg];
+        return $msg;
 
     } catch (Exception $e) {
         logModuleCall('broodleengage', 'ApplyUpdate', [], [], $e->getMessage(), []);
-        return ['status' => 'error', 'description' => 'Update failed: ' . $e->getMessage()];
+        return 'Update failed: ' . $e->getMessage();
     }
 }
 
@@ -1149,7 +1159,11 @@ function broodleengage_AdminServicesTabFields(array $params): array
         try {
             $accountInfo = broodleengage_apiRequest('GET', "/platform/api/v1/accounts/{$aid}", [], $platformToken, $baseUrl);
         } catch (Exception $e) {
-            $fetchError = $e->getMessage();
+            // 401 is expected for accounts not created by this platform token — not a real error
+            $errMsg = $e->getMessage();
+            if (strpos($errMsg, '401') === false && strpos($errMsg, '403') === false) {
+                $fetchError = $errMsg;
+            }
         }
         if ($record->chatwoot_user_token) {
             $ut = $record->chatwoot_user_token;
@@ -1264,7 +1278,7 @@ function broodleengage_AdminServicesTabFields(array $params): array
         $statusClass = $status === 'active' ? 'active' : ($status === 'suspended' ? 'suspended' : 'na');
 
         if ($fetchError) {
-            $html .= '<div class="be-admin-alert error">⚠️ Could not fetch live account data: ' . htmlspecialchars($fetchError) . '</div>';
+            $html .= '<div class="be-admin-alert warn">ℹ️ Could not fetch live account data from API: ' . htmlspecialchars($fetchError) . '</div>';
         }
 
         $html .= '<div class="be-admin-section">
