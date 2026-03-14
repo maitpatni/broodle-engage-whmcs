@@ -30,7 +30,7 @@
  *
  * @author  Broodle <https://broodle.host>
  * @link    https://engage.broodle.one
- * @version 2.1.4
+ * @version 2.1.5
  *
  * Auto-update: tags releases on https://github.com/maitpatni/broodle-engage-whmcs
  * WHMCS admin can check for and apply updates from the server module page.
@@ -46,7 +46,7 @@ use WHMCS\Database\Capsule;
 // UPDATE CHECKER CONSTANTS
 // ─────────────────────────────────────────────────────────────────────────────
 
-define('BROODLEENGAGE_VERSION',      '2.1.4');
+define('BROODLEENGAGE_VERSION',      '2.1.5');
 define('BROODLEENGAGE_GITHUB_REPO',  'maitpatni/broodle-engage-whmcs');
 define('BROODLEENGAGE_MODULE_DIR',   __DIR__);
 define('BROODLEENGAGE_UPDATE_CACHE', __DIR__ . '/.update_cache.json');
@@ -652,7 +652,11 @@ function broodleengage_ClientArea(array $params)
     $maxAgents  = (int) ($params['configoption2'] ?: 5);
     $maxInboxes = (int) ($params['configoption3'] ?: 3);
 
-    $ssoUrl       = 'clientarea.php?action=productdetails&id=' . $serviceId . '&dosinglesignon=1';
+    // Direct Chatwoot SSO URL — opened in new tab from the template
+    // WHMCS's built-in SSO redirects in the same tab; we bypass that by linking directly
+    $ssoDirectUrl = ($isProvisioned && $userToken)
+        ? "{$baseUrl}/app/login?auth_token=" . urlencode($userToken) . "&account_id={$chatwootAccountId}"
+        : '';
     $dashboardUrl = $isProvisioned
         ? "{$baseUrl}/app/accounts/{$chatwootAccountId}/dashboard"
         : $baseUrl;
@@ -718,7 +722,7 @@ function broodleengage_ClientArea(array $params)
             'planName'             => $planName,
             'maxAgents'            => $maxAgents,
             'maxInboxes'           => $maxInboxes,
-            'ssoUrl'               => $ssoUrl,
+            'ssoDirectUrl'         => $ssoDirectUrl,
             'dashboardUrl'         => $dashboardUrl,
             'isProvisioned'        => $isProvisioned,
             'serviceId'            => $serviceId,
