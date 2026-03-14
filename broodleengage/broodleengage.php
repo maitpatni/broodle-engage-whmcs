@@ -30,7 +30,7 @@
  *
  * @author  Broodle <https://broodle.host>
  * @link    https://engage.broodle.one
- * @version 2.1.5
+ * @version 2.1.6
  *
  * Auto-update: tags releases on https://github.com/maitpatni/broodle-engage-whmcs
  * WHMCS admin can check for and apply updates from the server module page.
@@ -46,7 +46,7 @@ use WHMCS\Database\Capsule;
 // UPDATE CHECKER CONSTANTS
 // ─────────────────────────────────────────────────────────────────────────────
 
-define('BROODLEENGAGE_VERSION',      '2.1.5');
+define('BROODLEENGAGE_VERSION',      '2.1.6');
 define('BROODLEENGAGE_GITHUB_REPO',  'maitpatni/broodle-engage-whmcs');
 define('BROODLEENGAGE_MODULE_DIR',   __DIR__);
 define('BROODLEENGAGE_UPDATE_CACHE', __DIR__ . '/.update_cache.json');
@@ -562,12 +562,13 @@ function broodleengage_ServiceSingleSignOn(array $params)
     try {
         broodleengage_ensureTable();
 
-        $baseUrl   = broodleengage_getApiBase($params);
-        $serviceId = (int) $params['serviceid'];
+        $baseUrl       = broodleengage_getApiBase($params);
+        $platformToken = $params['serveraccesshash'];
+        $serviceId     = (int) $params['serviceid'];
 
         $record = Capsule::table('mod_broodleengage')->where('service_id', $serviceId)->first();
 
-        if (!$record || !$record->chatwoot_user_token) {
+        if (!$record || !$record->chatwoot_user_id) {
             return ['success' => false, 'errorMsg' => 'No Broodle Engage account found for this service.'];
         }
 
@@ -575,15 +576,19 @@ function broodleengage_ServiceSingleSignOn(array $params)
             return ['success' => false, 'errorMsg' => 'Your Broodle Engage account is currently suspended. Please contact support.'];
         }
 
-        $accountId = $record->chatwoot_account_id;
-        $userToken = $record->chatwoot_user_token;
+        $userId = (int) $record->chatwoot_user_id;
 
-        // Chatwoot accepts auth_token as a query param on /app/login
-        // After auth it redirects to the account dashboard
-        $redirectUrl = "{$baseUrl}/app/login?auth_token=" . urlencode($userToken)
-            . "&account_id={$accountId}";
+        // Use the platform API SSO endpoint — returns a one-time sso_auth_token URL
+        // GET /platform/api/v1/users/{id}/login  →  {"url": "https://.../app/login?email=...&sso_auth_token=..."}
+        $ssoResp = broodleengage_apiRequest('GET', "/platform/api/v1/users/{$userId}/login", [], $platformToken, $baseUrl);
 
-        logModuleCall('broodleengage', __FUNCTION__, ['serviceid' => $serviceId], [], 'SSO redirect issued', ['serveraccesshash']);
+        if (empty($ssoResp['url'])) {
+            return ['success' => false, 'errorMsg' => 'SSO URL not returned by Chatwoot API.'];
+        }
+
+        $redirectUrl = $ssoResp['url'];
+
+        logModuleCall('broodleengage', __FUNCTION__, ['serviceid' => $serviceId, 'user_id' => $userId], [], 'SSO redirect issued', ['serveraccesshash']);
 
         return [
             'success'    => true,
@@ -647,16 +652,17 @@ function broodleengage_ClientArea(array $params)
         }
     }
     $servicePasswordHtml = htmlspecialchars($servicePassword, ENT_QUOTES, 'UTF-8');
+    // JSON-encoded for safe embedding in JS (handles all special chars correctly)
+    $servicePasswordJson = json_encode($servicePassword);
 
     $planName   = $params['configoption1'] ?: 'Starter';
     $maxAgents  = (int) ($params['configoption2'] ?: 5);
     $maxInboxes = (int) ($params['configoption3'] ?: 3);
 
-    // Direct Chatwoot SSO URL — opened in new tab from the template
-    // WHMCS's built-in SSO redirects in the same tab; we bypass that by linking directly
-    $ssoDirectUrl = ($isProvisioned && $userToken)
-        ? "{$baseUrl}/app/login?auth_token=" . urlencode($userToken) . "&account_id={$chatwootAccountId}"
-        : '';
+    // SSO URL is generated fresh via platform API at click time (ServiceSingleSignOn handles this)
+    // We pass the user ID so the template can construct the WHMCS SSO trigger URL
+    // The actual Chatwoot sso_auth_token URL is fetched server-side in ServiceSingleSignOn
+    $ssoUrl = 'clientarea.php?action=productdetails&id=' . $serviceId . '&dosinglesignon=1';
     $dashboardUrl = $isProvisioned
         ? "{$baseUrl}/app/accounts/{$chatwootAccountId}/dashboard"
         : $baseUrl;
@@ -717,12 +723,13 @@ function broodleengage_ClientArea(array $params)
             'baseUrl'              => $baseUrl,
             'accountId'            => $chatwootAccountId,
             'email'                => $chatwootEmail,
-            'servicePassword'      => $servicePassword,      // raw (for display)
-            'servicePasswordHtml'  => $servicePasswordHtml, // HTML-escaped (for onclick attrs)
+            'servicePassword'      => $servicePassword,
+            'servicePasswordHtml'  => $servicePasswordHtml,
+            'servicePasswordJson'  => $servicePasswordJson,
             'planName'             => $planName,
             'maxAgents'            => $maxAgents,
             'maxInboxes'           => $maxInboxes,
-            'ssoDirectUrl'         => $ssoDirectUrl,
+            'ssoUrl'               => $ssoUrl,
             'dashboardUrl'         => $dashboardUrl,
             'isProvisioned'        => $isProvisioned,
             'serviceId'            => $serviceId,
